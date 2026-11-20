@@ -87,7 +87,24 @@ button:disabled { opacity: 0.6; cursor: progress; }
       return true;
     } catch (_) { return false; }
   }
-  function show(html) { document.open(); document.write(html); document.close(); }
+  // Айфон: пока открыта клавиатура (пароль, код комнаты, имя), Safari сдвигает страницу к полю и после неё может не вернуть.
+  // Кнопки рисуются на месте, а касания засчитываются со сдвигом: жмёшь реакцию — уходит соседняя, стрелки «не нажимаются»
+  // (гостья на айфоне, 20.11). Вшиваем в игру возврат страницы: так починка выходит без пересборки шифра. В игре она же —
+  // с wip/slowmo 20.11, после пересборки обе живут рядом и не мешают друг другу
+  const FIX = `<script>(() => {
+  const typing = () => { const a = document.activeElement; return !!a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA'); };
+  const reset = () => {
+    if (typing()) return;
+    if (window.scrollX || window.scrollY) window.scrollTo(0, 0);
+    for (const el of [document.documentElement, document.body]) if (el && (el.scrollTop || el.scrollLeft)) { el.scrollTop = 0; el.scrollLeft = 0; }
+  };
+  const later = () => { setTimeout(reset, 60); setTimeout(reset, 400); }; // клавиатура уезжает с анимацией — дожимаем после неё
+  document.addEventListener('focusout', later);
+  if (window.visualViewport) visualViewport.addEventListener('resize', later);
+  window.addEventListener('orientationchange', later);
+  later();
+})();<\/script>`;
+  function show(html) { document.open(); document.write(html.replace(/<head(\s[^>]*)?>/i, m => m + FIX)); document.close(); }
   function form(msg) { $('gate').hidden = false; $('err').textContent = msg || ''; $('pass').focus(); }
   function busy(on) { $('go').disabled = on; $('go').textContent = on ? 'Открываю…' : 'Войти'; if (on) $('err').textContent = ''; }
 
