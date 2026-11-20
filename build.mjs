@@ -1,6 +1,9 @@
 // Тестовая сборка «Смэш мне в ногу» → https://smash-v-nogu.github.io/test/
 // Берёт index.html из ветки игры, включает «тестовый режим» и шифрует страницу паролем (AES-256-GCM, ключ — PBKDF2).
-// Запуск: TEST_PASS='пароль' node build.mjs <путь к index.html ветки>   → index.html этой папки
+// Запуск: node build.mjs <путь к index.html ветки>   → index.html этой папки; пароль — из Связки ключей мака
+//         (запись smash-v-nogu-test) или из TEST_PASS='пароль', если задан
+//         node build.mjs --save-pass   → положить пароль в Связку: спросит его (виден на экране, потом экран стирается)
+//                                       и сохранит, только если он открывает текущую сборку; новый пароль — с --new
 //         node build.mjs --gate   → только новая страница входа (gate.html) вокруг готового шифра, пароль не нужен
 //
 // Тестовый режим (основная игра не меняется, правки только в этой сборке):
@@ -19,6 +22,50 @@ const OUT = resolve(HERE, 'index.html');
 const b64 = u8 => Buffer.from(u8).toString('base64');
 const two = n => String(n).padStart(2, '0');
 const stamp = d => `сборка ${two(d.getDate())}.${two(d.getMonth() + 1)} ${two(d.getHours())}:${two(d.getMinutes())}`;
+
+// Пароль. Без учёта регистра и пробелов по краям (телефон любит заглавную первую букву); NFC — «й» и «ё» одной буквой, как их
+// шлёт клавиатура. Страница входа приводит ввод к тому же виду
+const norm = s => s.normalize('NFC').trim().toLowerCase();
+// Сводка пароля без самого пароля: длина и алфавит — по ней ловится чужая раскладка
+function summary(p) {
+  const kinds = [[/[a-z]/, 'латиница'], [/[а-яё]/, 'кириллица'], [/[0-9]/, 'цифры'], [/[^a-z0-9а-яё]/, 'другие знаки']]
+    .filter(([re]) => re.test(p)).map(([, name]) => name);
+  return `${[...p].length} знаков, ${kinds.join(' + ')}`;
+}
+// Связка ключей мака: пароль один раз кладёт Кирилл (--save-pass), дальше сборка берёт его сама, без человека у терминала.
+// В файлы, вывод и историю терминала пароль не попадает
+const KC = 'smash-v-nogu-test';
+function keychainGet() {
+  try { return execFileSync('security', ['find-generic-password', '-s', KC, '-a', KC, '-w'], { stdio: ['ignore', 'pipe', 'ignore'] }).toString().replace(/\n$/, ''); }
+  catch (_) { return ''; }
+}
+// Открывает ли пароль шифр страницы (та же расшифровка, что в gate.html)
+async function opens(p, page) {
+  const m = /data-salt="([^"]+)" data-iv="([^"]+)" data-iter="(\d+)">([^<]+)</.exec(page); if (!m) return null;
+  const u8 = s => new Uint8Array(Buffer.from(s, 'base64'));
+  const base = await webcrypto.subtle.importKey('raw', new TextEncoder().encode(p), 'PBKDF2', false, ['deriveKey']);
+  const key = await webcrypto.subtle.deriveKey({ name: 'PBKDF2', hash: 'SHA-256', salt: u8(m[1]), iterations: +m[3] }, base, { name: 'AES-GCM', length: 256 }, false, ['decrypt']);
+  try { await webcrypto.subtle.decrypt({ name: 'AES-GCM', iv: u8(m[2]) }, key, u8(m[4].trim())); return true; } catch (_) { return false; }
+}
+
+if (process.argv[2] === '--save-pass') {
+  const { createInterface } = await import('node:readline');
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  const raw = await new Promise(r => rl.question('Пароль теста (виден на экране): ', a => { rl.close(); r(a); }));
+  process.stdout.write('\x1b[2J\x1b[3J\x1b[H'); // стираем экран и прокрутку: пароль был виден
+  const p = norm(raw);
+  if (!p) { console.error('Пусто — ничего не сохранил'); process.exit(1); }
+  console.log(`Пароль: ${summary(p)}`);
+  if (existsSync(OUT) && !process.argv.includes('--new')) {
+    const ok = await opens(p, readFileSync(OUT, 'utf8'));
+    if (ok === false) { console.error('Не открывает текущую сборку — НЕ сохранил. Опечатка или раскладка? Новый пароль для всех: node build.mjs --save-pass --new'); process.exit(1); }
+    if (ok) console.log('Открывает текущую сборку — верный');
+  }
+  try { execFileSync('security', ['add-generic-password', '-U', '-s', KC, '-a', KC, '-l', 'Смэш мне в ногу — пароль /test/', '-w', p], { stdio: 'ignore' }); }
+  catch (_) { console.error('Связка ключей не приняла пароль'); process.exit(1); }
+  console.log(`Сохранён в Связке ключей (${KC}). Дальше сборка берёт его сама: node build.mjs <путь к index.html ветки>`);
+  process.exit(0);
+}
 
 // Подставляет шифр в страницу входа. Подвал: ветка, коммит и время сборки — по нему видно, какая сборка открыта
 function writeGate({ salt, iv, iter, data, from }) {
@@ -50,16 +97,17 @@ if (process.argv[2] === '--gate') {
 }
 
 const SRC = process.argv[2];
-const PASS = process.env.TEST_PASS;
-if (!SRC || !PASS) { console.error("Запуск: TEST_PASS='пароль' node build.mjs <путь к index.html ветки>"); process.exit(1); }
+const PASS = process.env.TEST_PASS || keychainGet();
+if (!SRC) { console.error('Запуск: node build.mjs <путь к index.html ветки>'); process.exit(1); }
+if (!PASS) { console.error('Нет пароля: положи его в Связку (node build.mjs --save-pass) или задай TEST_PASS'); process.exit(1); }
 const ITER = 600000; // PBKDF2-SHA256, как советует OWASP; на телефоне — около секунды, потом ключ запоминается
-// Пароль без учёта регистра и пробелов по краям (телефон любит заглавную первую букву); NFC — «й» и «ё» одной буквой, как их шлёт клавиатура
-const NORM = PASS.normalize('NFC').trim().toLowerCase();
-
-// Сводка пароля без самого пароля: длина и алфавит. Скрытый ввод в терминале не видно — по сводке ловится чужая раскладка
-const kinds = [[/[a-z]/, 'латиница'], [/[а-яё]/, 'кириллица'], [/[0-9]/, 'цифры'], [/[^a-z0-9а-яё]/, 'другие знаки']]
-  .filter(([re]) => re.test(NORM)).map(([, name]) => name);
-console.log(`Пароль: ${[...NORM].length} знаков, ${kinds.join(' + ')}`);
+const NORM = norm(PASS);
+console.log(`Пароль: ${summary(NORM)}, из ${process.env.TEST_PASS ? 'TEST_PASS' : 'Связки ключей'}`);
+// Пароль не тот, что у текущей сборки, — все, кто уже входил, войдут заново. Молча так не делаем
+if (existsSync(OUT) && !process.argv.includes('--new-pass')) {
+  const ok = await opens(NORM, readFileSync(OUT, 'utf8'));
+  if (ok === false) { console.error('Пароль не открывает текущую сборку — НЕ собрал. Сменить пароль для всех: добавь --new-pass'); process.exit(1); }
+}
 
 let html = readFileSync(SRC, 'utf8');
 
