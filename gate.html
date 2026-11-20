@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#0b1215">
+<title>ТЕСТ · Смэш мне в ногу</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230b1215'/%3E%3Ctext x='32' y='42' font-family='Arial' font-weight='900' font-size='26' text-anchor='middle' fill='%23e5484d'%3ET%3C/text%3E%3C/svg%3E">
+<style>
+:root { --hall: #0b1215; --ink: #e8efe9; --muted: #8ba49a; --edge: rgba(232, 239, 233, 0.14); --lamp: #ffd78a; --red: #e5484d; }
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; background: var(--hall); color: var(--ink); font: 16px/1.4 "Golos Text", "Segoe UI", system-ui, -apple-system, sans-serif; }
+body { display: grid; place-items: center; padding: 16px; }
+.card { width: min(360px, 100%); display: grid; gap: 14px; padding: 28px 24px 22px; border: 1px solid var(--edge); border-radius: 18px; background: rgba(9, 15, 17, 0.9); text-align: center; }
+.card[hidden] { display: none; }
+.tag { justify-self: center; padding: 4px 9px 3px; border-radius: 6px; background: var(--red); color: #fff; font-size: 11px; font-weight: 800; letter-spacing: 0.16em; }
+h1 { margin: 0; font-size: 22px; font-weight: 800; letter-spacing: -0.01em; }
+p { margin: 0; color: var(--muted); font-size: 14px; }
+input { width: 100%; padding: 13px 14px; border-radius: 12px; border: 1px solid var(--edge); background: #0e1719; color: var(--ink); font-size: 16px; font-weight: 500; font-family: inherit; text-align: center; }
+input:focus { outline: 2px solid var(--lamp); outline-offset: 1px; }
+button { padding: 13px 14px; border: 0; border-radius: 12px; background: var(--lamp); color: #14100a; font-size: 16px; font-weight: 700; font-family: inherit; cursor: pointer; }
+button:disabled { opacity: 0.6; cursor: progress; }
+.err { min-height: 1.4em; color: #ff8a80; font-size: 14px; }
+.from { font-size: 11px; color: #5f7670; }
+</style>
+</head>
+<body>
+<form class="card" id="gate" hidden autocomplete="off">
+  <span class="tag">ТЕСТ</span>
+  <h1>Смэш мне в ногу</h1>
+  <p>Тестовая сборка для своих. Результаты не попадают в общую таблицу.</p>
+  <input id="pass" type="password" placeholder="Пароль" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="go" required>
+  <button id="go" type="submit">Войти</button>
+  <div class="err" id="err" role="alert"></div>
+  <div class="from">%FROM%</div>
+</form>
+<script id="pack" type="text/plain" data-salt="%SALT%" data-iv="%IV%" data-iter="%ITER%">%DATA%</script>
+<script>
+(() => { // всё внутри: после document.open глобальная область остаётся той же, игра не должна споткнуться о наши имена
+  const $ = id => document.getElementById(id);
+  const KEY = 'bdm-test-key';
+  const u8 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+  const pack = $('pack'), salt = u8(pack.dataset.salt), iv = u8(pack.dataset.iv), iter = +pack.dataset.iter;
+  const data = u8(pack.textContent.trim());
+  const store = { get() { try { return localStorage.getItem(KEY); } catch (_) { return null; } },
+    set(v) { try { localStorage.setItem(KEY, v); } catch (_) {} }, del() { try { localStorage.removeItem(KEY); } catch (_) {} } };
+
+  async function decrypt(raw) {
+    const key = await crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['decrypt']);
+    return new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, data));
+  }
+  function show(html) { document.open(); document.write(html); document.close(); }
+  function form(msg) { $('gate').hidden = false; $('err').textContent = msg || ''; $('pass').focus(); }
+
+  if (!window.crypto || !crypto.subtle) { form('Браузер не умеет расшифровку: открой страницу по https в свежем браузере'); $('go').disabled = true; return; }
+
+  $('gate').addEventListener('submit', async e => {
+    e.preventDefault();
+    const pass = $('pass').value.trim().toLowerCase(); if (!pass) return;
+    $('go').disabled = true; $('go').textContent = 'Открываю…'; $('err').textContent = '';
+    let raw, html;
+    try {
+      const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(pass), 'PBKDF2', false, ['deriveBits']);
+      raw = new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: iter }, base, 256));
+      html = await decrypt(raw);
+    } catch (_) { $('go').disabled = false; $('go').textContent = 'Войти'; form('Не тот пароль'); $('pass').select(); return; }
+    store.set(btoa(String.fromCharCode(...raw))); // в следующий раз — без пароля
+    show(html);
+  });
+
+  // Уже входил в этом браузере: ключ сохранён, пароль не спрашиваем. Сборку пересобрали с другим паролем — ключ не подойдёт, спросим снова
+  const saved = store.get();
+  if (!saved) return form();
+  decrypt(u8(saved)).then(show, () => { store.del(); form(); });
+})();
+</script>
+</body>
+</html>
