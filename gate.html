@@ -17,10 +17,18 @@ body { display: grid; place-items: center; padding: 16px; }
 .tag { justify-self: center; padding: 4px 9px 3px; border-radius: 6px; background: var(--red); color: #fff; font-size: 11px; font-weight: 800; letter-spacing: 0.16em; }
 h1 { margin: 0; font-size: 22px; font-weight: 800; letter-spacing: -0.01em; }
 p { margin: 0; color: var(--muted); font-size: 14px; }
-input { width: 100%; padding: 13px 14px; border-radius: 12px; border: 1px solid var(--edge); background: #0e1719; color: var(--ink); font-size: 16px; font-weight: 500; font-family: inherit; text-align: center; }
+.field { position: relative; }
+input { width: 100%; padding: 13px 50px; border-radius: 12px; border: 1px solid var(--edge); background: #0e1719; color: var(--ink); font-size: 16px; font-weight: 500; font-family: inherit; text-align: center; }
 input:focus { outline: 2px solid var(--lamp); outline-offset: 1px; }
+input::-ms-reveal, input::-ms-clear { display: none; } /* у Edge свой глазик — второй не нужен */
 button { padding: 13px 14px; border: 0; border-radius: 12px; background: var(--lamp); color: #14100a; font-size: 16px; font-weight: 700; font-family: inherit; cursor: pointer; }
 button:disabled { opacity: 0.6; cursor: progress; }
+.eye { position: absolute; top: 50%; right: 5px; transform: translateY(-50%); width: 40px; height: 40px; padding: 0; display: grid; place-items: center; border-radius: 9px; background: none; color: var(--muted); }
+.eye:hover { color: var(--ink); }
+.eye:focus-visible { outline: 2px solid var(--lamp); }
+.eye[aria-pressed="true"] { color: var(--lamp); }
+.eye svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.eye[aria-pressed="true"] .slash { display: none; }
 .err { min-height: 1.4em; color: #ff8a80; font-size: 14px; }
 .from { font-size: 11px; color: #5f7670; }
 </style>
@@ -30,10 +38,15 @@ button:disabled { opacity: 0.6; cursor: progress; }
   <span class="tag">ТЕСТ</span>
   <h1>Смэш мне в ногу</h1>
   <p>Тестовая сборка для своих. Результаты не попадают в общую таблицу.</p>
-  <input id="pass" type="password" placeholder="Пароль" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="go" required>
+  <div class="field">
+    <input id="pass" type="password" placeholder="Пароль" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" enterkeyhint="go" required>
+    <button class="eye" id="eye" type="button" aria-label="Показать пароль" aria-pressed="false" title="Показать пароль">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/><path class="slash" d="M4 4l16 16"/></svg>
+    </button>
+  </div>
   <button id="go" type="submit">Войти</button>
   <div class="err" id="err" role="alert"></div>
-  <div class="from">%FROM%</div>
+  <div class="from" id="from">%FROM%</div>
 </form>
 <script id="pack" type="text/plain" data-salt="%SALT%" data-iv="%IV%" data-iter="%ITER%">%DATA%</script>
 <script>
@@ -41,38 +54,79 @@ button:disabled { opacity: 0.6; cursor: progress; }
   const $ = id => document.getElementById(id);
   const KEY = 'bdm-test-key';
   const u8 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
-  const pack = $('pack'), salt = u8(pack.dataset.salt), iv = u8(pack.dataset.iv), iter = +pack.dataset.iter;
-  const data = u8(pack.textContent.trim());
+  const norm = s => s.normalize('NFC').trim().toLowerCase(); // так же, как в build.mjs
+  let pk; // шифр страницы: id сборки (iv), соль, iv, итерации, данные
+  const load = el => { pk = { id: el.dataset.iv, salt: u8(el.dataset.salt), iv: u8(el.dataset.iv), iter: +el.dataset.iter, data: u8(el.textContent.trim()) }; };
+  load($('pack'));
   const store = { get() { try { return localStorage.getItem(KEY); } catch (_) { return null; } },
     set(v) { try { localStorage.setItem(KEY, v); } catch (_) {} }, del() { try { localStorage.removeItem(KEY); } catch (_) {} } };
 
-  async function decrypt(raw) {
-    const key = await crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['decrypt']);
-    return new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, data));
+  async function derive(pass) {
+    const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(pass), 'PBKDF2', false, ['deriveBits']);
+    return new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: pk.salt, iterations: pk.iter }, base, 256));
+  }
+  async function decrypt(raw) { // null — ключ не подошёл
+    try {
+      const key = await crypto.subtle.importKey('raw', raw, 'AES-GCM', false, ['decrypt']);
+      return new TextDecoder().decode(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: pk.iv }, key, pk.data));
+    } catch (_) { return null; }
+  }
+  // Страница могла устареть: вкладку открыли до пересборки или браузер взял её из кэша (GitHub Pages разрешает 10 минут).
+  // Старый шифр с тем же паролем молча открыл бы прошлую сборку, с другим — «Не тот пароль». Поэтому перед расшифровкой
+  // сверяемся с build.txt (id свежей сборки, несколько байт, мимо кэша); не совпал — берём страницу заново и подменяем шифр
+  async function fresh() {
+    try {
+      const v = (await (await fetch('build.txt?' + Date.now(), { cache: 'no-store' })).text()).trim();
+      if (!/^[A-Za-z0-9+/]{16}$/.test(v) || v === pk.id) return false;
+      const r = await fetch(location.pathname + '?fresh=' + Date.now(), { cache: 'no-store' });
+      if (!r.ok) return false;
+      const doc = new DOMParser().parseFromString(await r.text(), 'text/html'), el = doc.getElementById('pack');
+      if (!el || el.dataset.iv === pk.id) return false;
+      load(el);
+      const f = doc.getElementById('from'); if (f) $('from').textContent = f.textContent;
+      return true;
+    } catch (_) { return false; }
   }
   function show(html) { document.open(); document.write(html); document.close(); }
   function form(msg) { $('gate').hidden = false; $('err').textContent = msg || ''; $('pass').focus(); }
+  function busy(on) { $('go').disabled = on; $('go').textContent = on ? 'Открываю…' : 'Войти'; if (on) $('err').textContent = ''; }
+
+  // Глазик: показать / скрыть вводимый пароль. Фокус остаётся в поле, клавиатура телефона не прыгает
+  $('eye').addEventListener('mousedown', e => e.preventDefault());
+  $('eye').addEventListener('click', () => {
+    const p = $('pass'), on = p.type === 'password';
+    p.type = on ? 'text' : 'password';
+    $('eye').setAttribute('aria-pressed', String(on));
+    $('eye').title = on ? 'Скрыть пароль' : 'Показать пароль';
+    p.focus();
+  });
 
   if (!window.crypto || !crypto.subtle) { form('Браузер не умеет расшифровку: открой страницу по https в свежем браузере'); $('go').disabled = true; return; }
 
   $('gate').addEventListener('submit', async e => {
     e.preventDefault();
-    const pass = $('pass').value.trim().toLowerCase(); if (!pass) return;
-    $('go').disabled = true; $('go').textContent = 'Открываю…'; $('err').textContent = '';
-    let raw, html;
+    const pass = norm($('pass').value); if (!pass) return;
+    busy(true);
+    let raw, html = null;
     try {
-      const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(pass), 'PBKDF2', false, ['deriveBits']);
-      raw = new Uint8Array(await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: iter }, base, 256));
-      html = await decrypt(raw);
-    } catch (_) { $('go').disabled = false; $('go').textContent = 'Войти'; form('Не тот пароль'); $('pass').select(); return; }
+      await fresh();
+      html = await decrypt(raw = await derive(pass));
+    } catch (_) {}
+    if (html === null) { busy(false); form('Не тот пароль'); $('pass').select(); return; }
     store.set(btoa(String.fromCharCode(...raw))); // в следующий раз — без пароля
     show(html);
   });
 
   // Уже входил в этом браузере: ключ сохранён, пароль не спрашиваем. Сборку пересобрали с другим паролем — ключ не подойдёт, спросим снова
   const saved = store.get();
-  if (!saved) return form();
-  decrypt(u8(saved)).then(show, () => { store.del(); form(); });
+  if (!saved) { form(); fresh(); return; } // подвал сразу покажет свежую сборку
+  (async () => {
+    let raw = null, html = null;
+    try { raw = u8(saved); } catch (_) {}
+    if (raw) { await fresh(); html = await decrypt(raw); }
+    if (html !== null) return show(html);
+    store.del(); form();
+  })();
 })();
 </script>
 </body>

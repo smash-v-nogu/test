@@ -1,6 +1,7 @@
 // Тестовая сборка «Смэш мне в ногу» → https://smash-v-nogu.github.io/test/
 // Берёт index.html из ветки игры, включает «тестовый режим» и шифрует страницу паролем (AES-256-GCM, ключ — PBKDF2).
 // Запуск: TEST_PASS='пароль' node build.mjs <путь к index.html ветки>   → index.html этой папки
+//         node build.mjs --gate   → только новая страница входа (gate.html) вокруг готового шифра, пароль не нужен
 //
 // Тестовый режим (основная игра не меняется, правки только в этой сборке):
 // - общая база выключена: ни матчей, ни рекордов, ни лобби, ни входа по ПИНу; пускаются только ключи ретранслятора (turn);
@@ -14,23 +15,65 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+const OUT = resolve(HERE, 'index.html');
+const b64 = u8 => Buffer.from(u8).toString('base64');
+const two = n => String(n).padStart(2, '0');
+const stamp = d => `сборка ${two(d.getDate())}.${two(d.getMonth() + 1)} ${two(d.getHours())}:${two(d.getMinutes())}`;
+
+// Подставляет шифр в страницу входа. Подвал: ветка, коммит и время сборки — по нему видно, какая сборка открыта
+function writeGate({ salt, iv, iter, data, from }) {
+  const tpl = readFileSync(resolve(HERE, 'gate.html'), 'utf8');
+  const page = tpl
+    .replace('%SALT%', salt).replace('%IV%', iv).replace('%ITER%', String(iter))
+    .replace('%FROM%', from.replace(/[<>&"$]/g, ''))
+    .replace('%DATA%', data);
+  writeFileSync(OUT, page);
+  writeFileSync(resolve(HERE, 'build.txt'), iv + '\n'); // id сборки: по нему открытая страница входа узнаёт, что устарела
+  return page;
+}
+
+// --gate: поменялась только страница входа — заворачиваем в неё готовый шифр, пароль не нужен
+if (process.argv[2] === '--gate') {
+  const old = readFileSync(OUT, 'utf8');
+  const m = /<script id="pack" type="text\/plain" data-salt="([A-Za-z0-9+/=]+)" data-iv="([A-Za-z0-9+/=]+)" data-iter="(\d+)">([A-Za-z0-9+/=\s]+)<\/script>/.exec(old);
+  if (!m) { console.error('В index.html нет шифра — нужна полная сборка с паролем'); process.exit(1); }
+  let from = (/class="from"[^>]*>([^<]*)</.exec(old) || [])[1] || '';
+  if (!/сборка /.test(from)) { // старая страница без времени: берём время коммита, который её выложил
+    try {
+      const t = execFileSync('git', ['-C', HERE, 'log', '-1', '--format=%cI', '--', 'index.html'], { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+      if (t) from += ` · ${stamp(new Date(t))}`;
+    } catch (_) {}
+  }
+  const page = writeGate({ salt: m[1], iv: m[2], iter: +m[3], data: m[4].trim(), from });
+  console.log(`Страница входа обновлена: ${OUT} (${(page.length / 1024).toFixed(0)} КБ), шифр прежний (${from})`);
+  process.exit(0);
+}
+
 const SRC = process.argv[2];
 const PASS = process.env.TEST_PASS;
 if (!SRC || !PASS) { console.error("Запуск: TEST_PASS='пароль' node build.mjs <путь к index.html ветки>"); process.exit(1); }
-const ITER = 600000; // пароль без учёта регистра и пробелов по краям (телефон любит заглавную первую букву)
- // PBKDF2-SHA256, как советует OWASP; на телефоне — около секунды, потом ключ запоминается
+const ITER = 600000; // PBKDF2-SHA256, как советует OWASP; на телефоне — около секунды, потом ключ запоминается
+// Пароль без учёта регистра и пробелов по краям (телефон любит заглавную первую букву); NFC — «й» и «ё» одной буквой, как их шлёт клавиатура
+const NORM = PASS.normalize('NFC').trim().toLowerCase();
+
+// Сводка пароля без самого пароля: длина и алфавит. Скрытый ввод в терминале не видно — по сводке ловится чужая раскладка
+const kinds = [[/[a-z]/, 'латиница'], [/[а-яё]/, 'кириллица'], [/[0-9]/, 'цифры'], [/[^a-z0-9а-яё]/, 'другие знаки']]
+  .filter(([re]) => re.test(NORM)).map(([, name]) => name);
+console.log(`Пароль: ${[...NORM].length} знаков, ${kinds.join(' + ')}`);
 
 let html = readFileSync(SRC, 'utf8');
 
-// Откуда сборка: ветка и коммит — в подвал страницы входа и в отчёт
+// Откуда сборка: ветка, коммит и время — в подвал страницы входа и в отчёт
 let from = '';
+const Q = { stdio: ['ignore', 'pipe', 'ignore'] }; // не git — просто без ветки в подвале
 try {
   const dir = dirname(resolve(SRC));
-  const sha = execFileSync('git', ['-C', dir, 'rev-parse', '--short', 'HEAD']).toString().trim();
-  const br = execFileSync('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD']).toString().trim();
-  const dirty = execFileSync('git', ['-C', dir, 'status', '--porcelain', '--', 'index.html']).toString().trim();
+  const sha = execFileSync('git', ['-C', dir, 'rev-parse', '--short', 'HEAD'], Q).toString().trim();
+  const br = execFileSync('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], Q).toString().trim();
+  const dirty = execFileSync('git', ['-C', dir, 'status', '--porcelain', '--', 'index.html'], Q).toString().trim();
   from = `${br} ${sha}${dirty ? ' + правки' : ''}`;
 } catch (_) {}
+from = (from ? from + ' · ' : '') + stamp(new Date());
 
 // Каждая правка обязана найтись ровно столько раз, сколько указано: код игры поменялся — сборка падает, а не выходит молча битой
 function patch(name, a, b, n = 1) {
@@ -77,20 +120,13 @@ patch('плашка ТЕСТ', '</body>', `<div id="testBadge" aria-hidden="true
 </body>`);
 
 // Соль постоянная между сборками (берём из прошлой страницы): запомненный в браузере ключ переживает пересборку с тем же паролем
-const OUT = resolve(HERE, 'index.html');
-const b64 = u8 => Buffer.from(u8).toString('base64');
 let salt = null;
 if (existsSync(OUT)) { const m = /data-salt="([A-Za-z0-9+/=]+)"/.exec(readFileSync(OUT, 'utf8')); if (m) salt = new Uint8Array(Buffer.from(m[1], 'base64')); }
 if (!salt) salt = webcrypto.getRandomValues(new Uint8Array(16));
-const iv = webcrypto.getRandomValues(new Uint8Array(12));
-const base = await webcrypto.subtle.importKey('raw', new TextEncoder().encode(PASS.trim().toLowerCase()), 'PBKDF2', false, ['deriveKey']);
+const iv = webcrypto.getRandomValues(new Uint8Array(12)); // новый на каждую сборку: по нему страница входа узнаёт, что устарела
+const base = await webcrypto.subtle.importKey('raw', new TextEncoder().encode(NORM), 'PBKDF2', false, ['deriveKey']);
 const key = await webcrypto.subtle.deriveKey({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: ITER }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt']);
 const ct = new Uint8Array(await webcrypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(html)));
 
-const tpl = readFileSync(resolve(HERE, 'gate.html'), 'utf8');
-const page = tpl
-  .replace('%SALT%', b64(salt)).replace('%IV%', b64(iv)).replace('%ITER%', String(ITER))
-  .replace('%FROM%', from.replace(/[<>&"]/g, ''))
-  .replace('%DATA%', b64(ct));
-writeFileSync(OUT, page);
-console.log(`Готово: ${OUT} (${(page.length / 1024).toFixed(0)} КБ), сборка из ${from || SRC}, правок: 11`);
+const page = writeGate({ salt: b64(salt), iv: b64(iv), iter: ITER, data: b64(ct), from });
+console.log(`Готово: ${OUT} (${(page.length / 1024).toFixed(0)} КБ), ${from || SRC}, правок: 11`);
